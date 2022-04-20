@@ -416,7 +416,11 @@ namespace System.Management.Automation
                     case TokenKind.Generic:
                     case TokenKind.MinusMinus: // for native commands '--'
                     case TokenKind.Identifier:
-                        result = GetResultForIdentifier(completionContext, ref replacementIndex, ref replacementLength, isQuotedString);
+                        if (tokenAtCursor.TokenFlags != TokenFlags.TypeName)
+                        {
+                            result = GetResultForIdentifier(completionContext, ref replacementIndex, ref replacementLength, isQuotedString);
+                        }
+
                         break;
 
                     case TokenKind.Parameter:
@@ -466,7 +470,8 @@ namespace System.Management.Automation
                     case TokenKind.QuestionDot:
                         replacementIndex += tokenAtCursor.Text.Length;
                         replacementLength = 0;
-                        result = CompletionCompleters.CompleteMember(completionContext, @static: tokenAtCursor.Kind == TokenKind.ColonColon);
+                        result = CompletionCompleters.CompleteMember(completionContext, @static: tokenAtCursor.Kind == TokenKind.ColonColon, ref replacementLength);
+                        
                         break;
 
                     case TokenKind.Comment:
@@ -805,6 +810,35 @@ namespace System.Management.Automation
                                 result = GetResultForIdentifierInConfiguration(completionContext, configAst, keywordAst, out matched);
                             }
                         }
+
+                        // Handles following scenario where user is tab completing a member on an empty line:
+                        // "Hello".
+                        // <Tab>
+                        if ((result is null || result.Count == 0) && tokenBeforeCursor is not null)
+                        {
+                            switch (completionContext.TokenBeforeCursor.Kind)
+                            {
+                               
+                                case TokenKind.Dot:
+                                case TokenKind.ColonColon:
+                                case TokenKind.QuestionDot:
+                                    replacementIndex = cursor.Offset;
+                                    replacementLength = 0;
+                                    result = CompletionCompleters.CompleteMember(completionContext, @static: completionContext.TokenBeforeCursor.Kind == TokenKind.ColonColon, ref replacementLength);
+                                    break;
+
+                                case TokenKind.LParen:
+                                case TokenKind.Comma:
+                                    if (lastAst is AttributeAst)
+                                    {
+                                        result = GetResultForAttributeArgument(completionContext, ref replacementIndex, ref replacementLength);
+                                    }
+
+                                    break;
+                                default:
+                                    break;
+                            }
+                        }
                     }
                     else if (completionContext.TokenAtCursor == null)
                     {
@@ -850,6 +884,28 @@ namespace System.Management.Automation
                                         result = GetResultForEnumPropertyValueOfDSCResource(completionContext, string.Empty, ref replacementIndex, ref replacementLength, out unused);
                                         break;
                                     }
+                                case TokenKind.Break:
+                                case TokenKind.Continue:
+                                    {
+                                        if ((lastAst is BreakStatementAst breakStatement && breakStatement.Label is null)
+                                            || (lastAst is ContinueStatementAst continueStatement && continueStatement.Label is null))
+                                        {
+                                            result = CompleteLoopLabel(completionContext);
+                                        }
+                                        break;
+                                    }
+                                case TokenKind.Dot:
+                                case TokenKind.ColonColon:
+                                case TokenKind.QuestionDot:
+                                    // Handles following scenario with whitespace after member access token: "Hello". <Tab>
+                                    replacementIndex = cursor.Offset;
+                                    replacementLength = 0;
+                                    result = CompletionCompleters.CompleteMember(completionContext, @static: tokenBeforeCursor.Kind == TokenKind.ColonColon, ref replacementLength);
+                                    if (result is not null && result.Count > 0)
+                                    {
+                                        return result;
+                                    }
+                                    break;
                                 default:
                                     break;
                             }
@@ -903,6 +959,11 @@ namespace System.Management.Automation
                         typeNameToComplete = FindTypeNameToComplete(typeConstraintAst.TypeName, _cursorPosition);
                     }
                 }
+                
+                if (typeNameToComplete is null && tokenAtCursor?.TokenFlags == TokenFlags.TypeName)
+                {
+                    typeNameToComplete = new TypeName(tokenAtCursor.Extent, tokenAtCursor.Text);
+                }
 
                 if (typeNameToComplete != null)
                 {
@@ -918,6 +979,12 @@ namespace System.Management.Automation
             if (result == null || result.Count == 0)
             {
                 result = GetResultForHashtable(completionContext);
+                // Handles the following scenario: [ipaddress]@{Address=""; <Tab> }
+                if (result?.Count > 0)
+                {
+                    replacementIndex = completionContext.CursorPosition.Offset;
+                    replacementLength = 0;
+                }
             }
 
             if (result == null || result.Count == 0)
@@ -940,59 +1007,56 @@ namespace System.Management.Automation
         // Helper method to auto complete hashtable key
         private static List<CompletionResult> GetResultForHashtable(CompletionContext completionContext)
         {
-            var lastAst = completionContext.RelatedAsts.Last();
-            HashtableAst tempHashtableAst = null;
-            IScriptPosition cursor = completionContext.CursorPosition;
-            var hashTableAst = lastAst as HashtableAst;
-            if (hashTableAst != null)
-            {
-                // Check if the cursor within the hashtable
-                if (cursor.Offset < hashTableAst.Extent.EndOffset)
-                {
-                    tempHashtableAst = hashTableAst;
-                }
-                else if (cursor.Offset == hashTableAst.Extent.EndOffset)
-                {
-                    // Exclude the scenario that cursor at the end of hashtable, i.e. after '}'
-                    if (completionContext.TokenAtCursor == null ||
-                        completionContext.TokenAtCursor.Kind != TokenKind.RCurly)
-                    {
-                        tempHashtableAst = hashTableAst;
-                    }
-                }
-            }
-            else
-            {
-                // Handle property completion on a blank line for DynamicKeyword statement
-                Ast lastChildofHashtableAst;
-                hashTableAst = Ast.GetAncestorHashtableAst(lastAst, out lastChildofHashtableAst);
+            Ast lastRelatedAst = null;
+            var cursorPosition = completionContext.CursorPosition;
 
-                // Check if the hashtable within a DynamicKeyword statement
-                if (hashTableAst != null)
+            // Enumeration is used over the LastAst pattern because empty lines following a key-value pair will set LastAst to the value.
+            // Example:
+            // @{
+            //     Key1="Value1"
+            //     <Tab>
+            // }
+            // In this case the last 3 Asts will be StringConstantExpression, CommandExpression, and Pipeline instead of the expected Hashtable
+            for (int i = completionContext.RelatedAsts.Count - 1; i >= 0; i--)
+            {
+                Ast ast = completionContext.RelatedAsts[i];
+                if (cursorPosition.Offset >= ast.Extent.StartOffset && cursorPosition.Offset <= ast.Extent.EndOffset)
                 {
-                    var keywordAst = Ast.GetAncestorAst<DynamicKeywordStatementAst>(hashTableAst);
-                    if (keywordAst != null)
-                    {
-                        // Handle only empty line
-                        if (string.IsNullOrWhiteSpace(cursor.Line))
-                        {
-                            // Check if the cursor outside of last child of hashtable and within the hashtable
-                            if (cursor.Offset > lastChildofHashtableAst.Extent.EndOffset &&
-                                cursor.Offset <= hashTableAst.Extent.EndOffset)
-                            {
-                                tempHashtableAst = hashTableAst;
-                            }
-                        }
-                    }
+                    lastRelatedAst = ast;
+                    break;
                 }
             }
 
-            hashTableAst = tempHashtableAst;
-            if (hashTableAst != null)
+            if (lastRelatedAst is HashtableAst hashtableAst)
             {
+                // Cursor is just after the hashtable: @{}<Tab>
+                if (completionContext.TokenAtCursor is not null && completionContext.TokenAtCursor.Kind == TokenKind.RCurly)
+                {
+                    return null;
+                }
+
+                bool cursorIsWithinOrOnSameLineAsKeypair = false;
+                foreach (var pair in hashtableAst.KeyValuePairs)
+                {
+                    if (cursorPosition.Offset >= pair.Item1.Extent.StartOffset
+                        && (cursorPosition.Offset <= pair.Item2.Extent.EndOffset || cursorPosition.LineNumber == pair.Item2.Extent.EndLineNumber))
+                    {
+                        cursorIsWithinOrOnSameLineAsKeypair = true;
+                        break;
+                    }
+                }
+
+                if (cursorIsWithinOrOnSameLineAsKeypair)
+                {
+                    var tokenBeforeOrAtCursor = completionContext.TokenBeforeCursor ?? completionContext.TokenAtCursor;
+                    if (tokenBeforeOrAtCursor.Kind != TokenKind.Semi)
+                    {
+                        return null;
+                    }
+                }
                 completionContext.ReplacementIndex = completionContext.CursorPosition.Offset;
                 completionContext.ReplacementLength = 0;
-                return CompletionCompleters.CompleteHashtableKey(completionContext, hashTableAst);
+                return CompletionCompleters.CompleteHashtableKey(completionContext, hashtableAst);
             }
 
             return null;
@@ -1759,6 +1823,11 @@ namespace System.Management.Automation
             var tokenAtCursorText = tokenAtCursor.Text;
             completionContext.WordToComplete = tokenAtCursorText;
 
+            if (lastAst.Parent is BreakStatementAst || lastAst.Parent is ContinueStatementAst)
+            {
+                return CompleteLoopLabel(completionContext);
+            }
+
             var strConst = lastAst as StringConstantExpressionAst;
             if (strConst != null)
             {
@@ -1971,8 +2040,24 @@ namespace System.Management.Automation
             }
 
             TokenKind memberOperator = TokenKind.Unknown;
-            bool isMemberCompletion = (lastAst.Parent is MemberExpressionAst);
-            bool isStatic = isMemberCompletion && ((MemberExpressionAst)lastAst.Parent).Static;
+            bool isMemberCompletion = lastAst.Parent is MemberExpressionAst;
+            bool isStatic = false;
+            if (isMemberCompletion)
+            {
+                var currentExpression = (MemberExpressionAst)lastAst.Parent;
+                // Handles following scenario with an incomplete member access token at the end of the statement:
+                // [System.IO.FileInfo]::new<Tab>().Directory.BaseName.Length.
+                // Traverses up the expressions until it finds one under at the cursor
+                while (currentExpression.Extent.EndOffset >= completionContext.CursorPosition.Offset
+                    && currentExpression.Expression is MemberExpressionAst memberExpression
+                    && memberExpression.Member.Extent.EndOffset >= completionContext.CursorPosition.Offset)
+                {
+                    currentExpression = memberExpression;
+                }
+
+                isStatic = currentExpression.Static;
+            }
+
             bool isWildcard = false;
 
             if (!isMemberCompletion)
@@ -2023,7 +2108,7 @@ namespace System.Management.Automation
 
             if (isMemberCompletion)
             {
-                result = CompletionCompleters.CompleteMember(completionContext, @static: (isStatic || memberOperator == TokenKind.ColonColon));
+                result = CompletionCompleters.CompleteMember(completionContext, @static: (isStatic || memberOperator == TokenKind.ColonColon), ref replacementLength);
 
                 // If the last token was just a '.', we tried to complete members.  That may
                 // have failed because it wasn't really an attempt to complete a member, in
@@ -2107,6 +2192,7 @@ namespace System.Management.Automation
             result = CompletionCompleters.CompleteCommandArgument(completionContext);
             replacementIndex = completionContext.ReplacementIndex;
             replacementLength = completionContext.ReplacementLength;
+
             return result;
         }
 
@@ -2116,10 +2202,11 @@ namespace System.Management.Automation
             Type attributeType = null;
             string argName = string.Empty;
             Ast argAst = completionContext.RelatedAsts.Find(static ast => ast is NamedAttributeArgumentAst);
-            NamedAttributeArgumentAst namedArgAst = argAst as NamedAttributeArgumentAst;
-            if (argAst != null && namedArgAst != null)
+            AttributeAst attAst;
+            if (argAst is NamedAttributeArgumentAst namedArgAst)
             {
-                attributeType = ((AttributeAst)namedArgAst.Parent).TypeName.GetReflectionAttributeType();
+                attAst = (AttributeAst)namedArgAst.Parent;
+                attributeType = attAst.TypeName.GetReflectionAttributeType();
                 argName = namedArgAst.ArgumentName;
                 replacementIndex = namedArgAst.Extent.StartOffset;
                 replacementLength = argName.Length;
@@ -2127,21 +2214,34 @@ namespace System.Management.Automation
             else
             {
                 Ast astAtt = completionContext.RelatedAsts.Find(static ast => ast is AttributeAst);
-                AttributeAst attAst = astAtt as AttributeAst;
-                if (astAtt != null && attAst != null)
+                attAst = astAtt as AttributeAst;
+                if (attAst is not null)
                 {
                     attributeType = attAst.TypeName.GetReflectionAttributeType();
                 }
             }
 
-            if (attributeType != null)
+            if (attributeType is not null)
             {
+                int cursorPosition = completionContext.CursorPosition.Offset;
+                var existingArguments = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var namedArgument in attAst.NamedArguments)
+                {
+                    if (cursorPosition < namedArgument.Extent.StartOffset || cursorPosition > namedArgument.Extent.EndOffset)
+                    {
+                        existingArguments.Add(namedArgument.ArgumentName);
+                    }
+                }
+
                 PropertyInfo[] propertyInfos = attributeType.GetProperties(BindingFlags.Public | BindingFlags.Instance);
                 List<CompletionResult> result = new List<CompletionResult>();
                 foreach (PropertyInfo property in propertyInfos)
                 {
-                    // Ignore getter-only properties, including 'TypeId' (all attributes inherit it).
-                    if (!property.CanWrite) { continue; }
+                    // Ignore getter-only properties and properties that have already been set.
+                    if (!property.CanWrite || existingArguments.Contains(property.Name))
+                    {
+                        continue; 
+                    }
 
                     if (property.Name.StartsWith(argName, StringComparison.OrdinalIgnoreCase))
                     {
@@ -2201,6 +2301,41 @@ namespace System.Management.Automation
             {
                 if (clearLiteralPathsKey)
                     completionContext.Options.Remove("LiteralPaths");
+            }
+
+            return result;
+        }
+
+        /// <summary>
+        /// Complete loop labels after labeled control flow statements such as Break and Continue.
+        /// </summary>
+        private static List<CompletionResult> CompleteLoopLabel(CompletionContext completionContext)
+        {
+            var result = new List<CompletionResult>();
+            foreach (Ast ast in completionContext.RelatedAsts)
+            {
+                if (ast is LabeledStatementAst labeledStatement
+                    && labeledStatement.Label is not null
+                    && (completionContext.WordToComplete is null || labeledStatement.Label.StartsWith(completionContext.WordToComplete, StringComparison.OrdinalIgnoreCase)))
+                {
+                    result.Add(new CompletionResult(labeledStatement.Label, labeledStatement.Label, CompletionResultType.Text, labeledStatement.Extent.Text));
+                }
+                else if (ast is ErrorStatementAst errorStatement)
+                {
+                    // Handles incomplete do/switch loops (other labeled statements do not need this special treatment)
+                    // The regex looks for the loopLabel of errorstatements that look like do/switch loops
+                    // For example in ":Label do " it will find "Label".
+                    var labelMatch = Regex.Match(errorStatement.Extent.Text, @"(?<=^:)\w+(?=\s+(do|switch)\b(?!-))", RegexOptions.IgnoreCase);
+                    if (labelMatch.Success)
+                    {
+                        result.Add(new CompletionResult(labelMatch.Value, labelMatch.Value, CompletionResultType.Text, errorStatement.Extent.Text));
+                    }
+                }
+            }
+
+            if (result.Count == 0)
+            {
+                return null;
             }
 
             return result;

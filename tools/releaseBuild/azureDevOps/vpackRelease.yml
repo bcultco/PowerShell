@@ -24,8 +24,12 @@ stages:
   - job: rename
     displayName: Name the build
     condition: succeeded()
+
     pool:
-      vmImage: 'windows-latest'
+      name: PowerShell1ES
+      demands:
+      - ImageOverride -equals PSMMS2019-Secure
+
     steps:
     - checkout: self
       clean: true

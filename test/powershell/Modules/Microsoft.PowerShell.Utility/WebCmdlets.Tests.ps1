@@ -370,6 +370,8 @@ $redirectTests = @(
 
 Describe "Invoke-WebRequest tests" -Tags "Feature", "RequireAdminOnWindows" {
     BeforeAll {
+        $oldProgress = $ProgressPreference
+        $ProgressPreference = 'SilentlyContinue'
         $WebListener = Start-WebListener
         $NotFoundQuery = @{
             statuscode = 404
@@ -378,6 +380,10 @@ Describe "Invoke-WebRequest tests" -Tags "Feature", "RequireAdminOnWindows" {
             body = 'oops'
             headers = "{}"
         }
+    }
+
+    AfterAll {
+        $ProgressPreference = $oldProgress
     }
 
     # Validate the output of Invoke-WebRequest
@@ -456,6 +462,8 @@ Describe "Invoke-WebRequest tests" -Tags "Feature", "RequireAdminOnWindows" {
 
         # Validate response
         ValidateResponse -response $result
+
+        $result.Output.Headers.'Content-Length' | Should -BeNullOrEmpty
     }
 
     It "Validate Invoke-WebRequest -DisableKeepAlive" {
@@ -703,6 +711,13 @@ Describe "Invoke-WebRequest tests" -Tags "Feature", "RequireAdminOnWindows" {
         $command = "Invoke-WebRequest -Uri '$uri' -CustomMethod GET -Body @{'testparam'='testvalue'}"
         $result = ExecuteWebCommand -command $command
         ($result.Output.Content | ConvertFrom-Json).args.testparam | Should -Be "testvalue"
+    }
+
+    It 'Validate Invoke-WebRequest empty body CustomMethod GET' {
+        $uri = Get-WebListenerUrl -Test 'Get'
+        $command = "Invoke-WebRequest -Uri '$uri' -CustomMethod GET"
+        $result = ExecuteWebCommand -command $command
+        $result.Output.Headers.'Content-Length' | Should -BeNullOrEmpty
     }
 
     It "Validate Invoke-WebRequest body is converted to query params for CustomMethod GET and -NoProxy" {
@@ -1715,46 +1730,51 @@ Describe "Invoke-WebRequest tests" -Tags "Feature", "RequireAdminOnWindows" {
             # We put Tls13 tests at pending due to modern OS limitations.
             # Tracking issue https://github.com/PowerShell/PowerShell/issues/13439
 
-            $skipForTls1OnLinux = $IsLinux -and $env:TF_BUILD
+            $skipForTls1 = $true
 
             ## Test cases for the 1st 'It'
             $testCases1 = @(
                 @{ Test = @{SslProtocol = 'Default'; ActualProtocol = 'Default'}; Pending = $false }
-                @{ Test = @{SslProtocol = 'Tls'; ActualProtocol = 'Tls'}; Pending = $skipForTls1OnLinux }
-                @{ Test = @{SslProtocol = 'Tls11'; ActualProtocol = 'Tls11'}; Pending = $skipForTls1OnLinux }
+                @{ Test = @{SslProtocol = 'Tls'; ActualProtocol = 'Tls'}; Pending = $skipForTls1 }
+                @{ Test = @{SslProtocol = 'Tls11'; ActualProtocol = 'Tls11'}; Pending = $skipForTls1 }
                 @{ Test = @{SslProtocol = 'Tls12'; ActualProtocol = 'Tls12'}; Pending = $false }
                 @{ Test = @{SslProtocol = 'Tls13'; ActualProtocol = 'Tls13'}; Pending = $true }
                 @{ Test = @{SslProtocol = 'Tls, Tls11, Tls12'; ActualProtocol = 'Tls12'}; Pending = $false }
                 @{ Test = @{SslProtocol = 'Tls, Tls11, Tls12, Tls13'; ActualProtocol = 'Tls13'}; Pending = $true }
                 @{ Test = @{SslProtocol = 'Tls11, Tls12'; ActualProtocol = 'Tls12'}; Pending = $false }
-                @{ Test = @{SslProtocol = 'Tls, Tls11, Tls12'; ActualProtocol = 'Tls11'}; Pending = $skipForTls1OnLinux }
-                @{ Test = @{SslProtocol = 'Tls, Tls11, Tls12, Tls13'; ActualProtocol = 'Tls11'}; Pending = $skipForTls1OnLinux }
-                @{ Test = @{SslProtocol = 'Tls11, Tls12'; ActualProtocol = 'Tls11'}; Pending = $skipForTls1OnLinux }
-                @{ Test = @{SslProtocol = 'Tls, Tls11'; ActualProtocol = 'Tls11'}; Pending = $skipForTls1OnLinux }
-                @{ Test = @{SslProtocol = 'Tls, Tls11, Tls12'; ActualProtocol = 'Tls'}; Pending = $skipForTls1OnLinux }
+                @{ Test = @{SslProtocol = 'Tls, Tls11, Tls12'; ActualProtocol = 'Tls11'}; Pending = $skipForTls1 }
+                @{ Test = @{SslProtocol = 'Tls, Tls11, Tls12, Tls13'; ActualProtocol = 'Tls11'}; Pending = $skipForTls1 }
+                @{ Test = @{SslProtocol = 'Tls11, Tls12'; ActualProtocol = 'Tls11'}; Pending = $skipForTls1 }
+                @{ Test = @{SslProtocol = 'Tls, Tls11'; ActualProtocol = 'Tls11'}; Pending = $skipForTls1 }
+                @{ Test = @{SslProtocol = 'Tls, Tls11, Tls12'; ActualProtocol = 'Tls'}; Pending = $skipForTls1 }
                 @{ Test = @{SslProtocol = 'Tls, Tls11, Tls13'; ActualProtocol = 'Tls'}; Pending = $true }
-                @{ Test = @{SslProtocol = 'Tls, Tls11'; ActualProtocol = 'Tls'}; Pending = $skipForTls1OnLinux }
+                @{ Test = @{SslProtocol = 'Tls, Tls11'; ActualProtocol = 'Tls'}; Pending = $skipForTls1 }
                 # Skipping intermediary protocols is not supported on all platforms
-                @{ Test = @{SslProtocol = 'Tls, Tls12'; ActualProtocol = 'Tls'}; Pending = -not $IsWindows }
+                # Removed this as Tls now default to Tls12
+                # @{ Test = @{SslProtocol = 'Tls, Tls12'; ActualProtocol = 'Tls'}; Pending = -not $IsWindows }
                 @{ Test = @{SslProtocol = 'Tls, Tls12'; ActualProtocol = 'Tls12'}; Pending = -not $IsWindows }
             )
 
             $testCases2 = @(
                 @{ Test = @{IntendedProtocol = 'Tls'; ActualProtocol = 'Tls13'}; Pending = $true }
-                @{ Test = @{IntendedProtocol = 'Tls'; ActualProtocol = 'Tls12'}; Pending = $false }
+                # Removed this as Tls now default to Tls12
+                # @{ Test = @{IntendedProtocol = 'Tls'; ActualProtocol = 'Tls12'}; Pending = $false }
                 @{ Test = @{IntendedProtocol = 'Tls'; ActualProtocol = 'Tls11'}; Pending = $false }
                 @{ Test = @{IntendedProtocol = 'Tls11'; ActualProtocol = 'Tls13'}; Pending = $true }
-                @{ Test = @{IntendedProtocol = 'Tls11'; ActualProtocol = 'Tls12'}; Pending = $false }
+                # Removed this as Tls now default to Tls12
+                # @{ Test = @{IntendedProtocol = 'Tls11'; ActualProtocol = 'Tls12'}; Pending = $false }
                 @{ Test = @{IntendedProtocol = 'Tls12'; ActualProtocol = 'Tls11'}; Pending = $false }
                 @{ Test = @{IntendedProtocol = 'Tls11'; ActualProtocol = 'Tls'}; Pending = $false }
                 @{ Test = @{IntendedProtocol = 'Tls12'; ActualProtocol = 'Tls'}; Pending = $false }
                 @{ Test = @{IntendedProtocol = 'Tls13'; ActualProtocol = 'Tls'}; Pending = $true }
-                @{ Test = @{IntendedProtocol = 'Tls11, Tls12'; ActualProtocol = 'Tls'}; Pending = $false }
+                # Removed this as Tls now default to Tls12
+                # @{ Test = @{IntendedProtocol = 'Tls11, Tls12'; ActualProtocol = 'Tls'}; Pending = $false }
                 @{ Test = @{IntendedProtocol = 'Tls11, Tls12, Tls13'; ActualProtocol = 'Tls'}; Pending = $true }
                 @{ Test = @{IntendedProtocol = 'Tls, Tls12'; ActualProtocol = 'Tls13'}; Pending = $true }
                 @{ Test = @{IntendedProtocol = 'Tls, Tls11'; ActualProtocol = 'Tls13'}; Pending = $true }
                 @{ Test = @{IntendedProtocol = 'Tls, Tls12'; ActualProtocol = 'Tls11'}; Pending = $false }
-                @{ Test = @{IntendedProtocol = 'Tls, Tls11'; ActualProtocol = 'Tls12'}; Pending = $false }
+                # Removed this as Tls now default to Tls12
+                # @{ Test = @{IntendedProtocol = 'Tls, Tls11'; ActualProtocol = 'Tls12'}; Pending = $false }
             )
         }
 
@@ -2061,6 +2081,9 @@ Describe "Invoke-WebRequest tests" -Tags "Feature", "RequireAdminOnWindows" {
 
 Describe "Invoke-RestMethod tests" -Tags "Feature", "RequireAdminOnWindows" {
     BeforeAll {
+        $oldProgress = $ProgressPreference
+        $ProgressPreference = 'SilentlyContinue'
+
         $WebListener = Start-WebListener
 
         $NotFoundQuery = @{
@@ -2070,6 +2093,10 @@ Describe "Invoke-RestMethod tests" -Tags "Feature", "RequireAdminOnWindows" {
             body = '{"message": "oops"}'
             headers = "{}"
         }
+    }
+
+    AfterAll {
+        $ProgressPreference = $oldProgress
     }
 
     #User-Agent changes on different platforms, so tests should only be run if on the correct platform
@@ -2111,6 +2138,7 @@ Describe "Invoke-RestMethod tests" -Tags "Feature", "RequireAdminOnWindows" {
 
         # Validate response
         $result.Error | Should -BeNullOrEmpty
+        $result.Output.headers.'Content-Length' | Should -Be 0
     }
 
     It "Invoke-RestMethod returns headers dictionary" {
@@ -2348,6 +2376,13 @@ Describe "Invoke-RestMethod tests" -Tags "Feature", "RequireAdminOnWindows" {
         $command = "Invoke-RestMethod -Uri '$uri' -CustomMethod GET -Body @{'testparam'='testvalue'}"
         $result = ExecuteWebCommand -command $command
         $result.Output.args.testparam | Should -Be "testvalue"
+    }
+
+    It 'Validate Invoke-RestMethod empty body CustomMethod GET' {
+        $uri = Get-WebListenerUrl -Test 'Get'
+        $command = "Invoke-RestMethod -Uri '$uri' -CustomMethod GET"
+        $result = ExecuteWebCommand -command $command
+        $result.Output.Headers.'Content-Length' | Should -BeNullOrEmpty
     }
 
     It "Validate Invoke-RestMethod body is converted to query params for CustomMethod GET and -NoProxy" {
@@ -3297,45 +3332,50 @@ Describe "Invoke-RestMethod tests" -Tags "Feature", "RequireAdminOnWindows" {
             # We put Tls13 tests at pending due to modern OS limitations.
             # Tracking issue https://github.com/PowerShell/PowerShell/issues/13439
 
-            $skipForTls1OnLinux = $IsLinux -and $env:TF_BUILD
+            $skipForTls1 = $true
 
             $testCases1 = @(
                 @{ Test = @{SslProtocol = 'Default'; ActualProtocol = 'Default'}; Pending = $false }
-                @{ Test = @{SslProtocol = 'Tls'; ActualProtocol = 'Tls'}; Pending = $skipForTls1OnLinux }
-                @{ Test = @{SslProtocol = 'Tls11'; ActualProtocol = 'Tls11'}; Pending = $skipForTls1OnLinux }
+                @{ Test = @{SslProtocol = 'Tls'; ActualProtocol = 'Tls'}; Pending = $skipForTls1 }
+                @{ Test = @{SslProtocol = 'Tls11'; ActualProtocol = 'Tls11'}; Pending = $skipForTls1 }
                 @{ Test = @{SslProtocol = 'Tls12'; ActualProtocol = 'Tls12'}; Pending = $false }
                 @{ Test = @{SslProtocol = 'Tls13'; ActualProtocol = 'Tls13'}; Pending = $true }
                 @{ Test = @{SslProtocol = 'Tls, Tls11, Tls12'; ActualProtocol = 'Tls12'}; Pending = $false }
                 @{ Test = @{SslProtocol = 'Tls, Tls11, Tls12, Tls13'; ActualProtocol = 'Tls13'}; Pending = $true }
                 @{ Test = @{SslProtocol = 'Tls11, Tls12'; ActualProtocol = 'Tls12'}; Pending = $false }
-                @{ Test = @{SslProtocol = 'Tls, Tls11, Tls12'; ActualProtocol = 'Tls11'}; Pending = $skipForTls1OnLinux }
-                @{ Test = @{SslProtocol = 'Tls, Tls11, Tls12, Tls13'; ActualProtocol = 'Tls11'}; Pending = $skipForTls1OnLinux }
-                @{ Test = @{SslProtocol = 'Tls11, Tls12'; ActualProtocol = 'Tls11'}; Pending = $skipForTls1OnLinux }
-                @{ Test = @{SslProtocol = 'Tls, Tls11'; ActualProtocol = 'Tls11'}; Pending = $skipForTls1OnLinux }
-                @{ Test = @{SslProtocol = 'Tls, Tls11, Tls12'; ActualProtocol = 'Tls'}; Pending = $skipForTls1OnLinux }
+                @{ Test = @{SslProtocol = 'Tls, Tls11, Tls12'; ActualProtocol = 'Tls11'}; Pending = $skipForTls1 }
+                @{ Test = @{SslProtocol = 'Tls, Tls11, Tls12, Tls13'; ActualProtocol = 'Tls11'}; Pending = $skipForTls1 }
+                @{ Test = @{SslProtocol = 'Tls11, Tls12'; ActualProtocol = 'Tls11'}; Pending = $skipForTls1 }
+                @{ Test = @{SslProtocol = 'Tls, Tls11'; ActualProtocol = 'Tls11'}; Pending = $skipForTls1 }
+                @{ Test = @{SslProtocol = 'Tls, Tls11, Tls12'; ActualProtocol = 'Tls'}; Pending = $skipForTls1 }
                 @{ Test = @{SslProtocol = 'Tls, Tls11, Tls13'; ActualProtocol = 'Tls'}; Pending = $true }
-                @{ Test = @{SslProtocol = 'Tls, Tls11'; ActualProtocol = 'Tls'}; Pending = $skipForTls1OnLinux }
+                @{ Test = @{SslProtocol = 'Tls, Tls11'; ActualProtocol = 'Tls'}; Pending = $skipForTls1 }
                 # Skipping intermediary protocols is not supported on all platforms
-                @{ Test = @{SslProtocol = 'Tls, Tls12'; ActualProtocol = 'Tls'}; Pending = -not $IsWindows }
+                # Removed this as Tls now default to Tls12
+                # @{ Test = @{SslProtocol = 'Tls, Tls12'; ActualProtocol = 'Tls'}; Pending = -not $IsWindows }
                 @{ Test = @{SslProtocol = 'Tls, Tls12'; ActualProtocol = 'Tls12'}; Pending = -not $IsWindows }
             )
 
             $testCases2 = @(
                 @{ Test = @{IntendedProtocol = 'Tls'; ActualProtocol = 'Tls13'}; Pending = $true }
-                @{ Test = @{IntendedProtocol = 'Tls'; ActualProtocol = 'Tls12'}; Pending = $false }
+                # Removed this as Tls now default to Tls12
+                # @{ Test = @{IntendedProtocol = 'Tls'; ActualProtocol = 'Tls12'}; Pending = $false }
                 @{ Test = @{IntendedProtocol = 'Tls'; ActualProtocol = 'Tls11'}; Pending = $false }
                 @{ Test = @{IntendedProtocol = 'Tls11'; ActualProtocol = 'Tls13'}; Pending = $true }
-                @{ Test = @{IntendedProtocol = 'Tls11'; ActualProtocol = 'Tls12'}; Pending = $false }
+                # Removed this as Tls now default to Tls12
+                # @{ Test = @{IntendedProtocol = 'Tls11'; ActualProtocol = 'Tls12'}; Pending = $false }
                 @{ Test = @{IntendedProtocol = 'Tls12'; ActualProtocol = 'Tls11'}; Pending = $false }
                 @{ Test = @{IntendedProtocol = 'Tls11'; ActualProtocol = 'Tls'}; Pending = $false }
                 @{ Test = @{IntendedProtocol = 'Tls12'; ActualProtocol = 'Tls'}; Pending = $false }
                 @{ Test = @{IntendedProtocol = 'Tls13'; ActualProtocol = 'Tls'}; Pending = $true }
-                @{ Test = @{IntendedProtocol = 'Tls11, Tls12'; ActualProtocol = 'Tls'}; Pending = $false }
+                # Removed this as Tls now default to Tls12
+                # @{ Test = @{IntendedProtocol = 'Tls11, Tls12'; ActualProtocol = 'Tls'}; Pending = $false }
                 @{ Test = @{IntendedProtocol = 'Tls11, Tls12, Tls13'; ActualProtocol = 'Tls'}; Pending = $false }
                 @{ Test = @{IntendedProtocol = 'Tls, Tls12'; ActualProtocol = 'Tls13'}; Pending = $true }
                 @{ Test = @{IntendedProtocol = 'Tls, Tls11'; ActualProtocol = 'Tls13'}; Pending = $true }
                 @{ Test = @{IntendedProtocol = 'Tls, Tls12'; ActualProtocol = 'Tls11'}; Pending = $false }
-                @{ Test = @{IntendedProtocol = 'Tls, Tls11'; ActualProtocol = 'Tls12'}; Pending = $false }
+                # Removed this as Tls now default to Tls12
+                # @{ Test = @{IntendedProtocol = 'Tls, Tls11'; ActualProtocol = 'Tls12'}; Pending = $false }
             )
         }
 
@@ -3528,7 +3568,13 @@ Describe "Invoke-RestMethod tests" -Tags "Feature", "RequireAdminOnWindows" {
 
 Describe "Validate Invoke-WebRequest and Invoke-RestMethod -InFile" -Tags "Feature", "RequireAdminOnWindows" {
     BeforeAll {
+        $oldProgress = $ProgressPreference
+        $ProgressPreference = 'SilentlyContinue'
         $WebListener = Start-WebListener
+    }
+
+    AfterAll {
+        $ProgressPreference = $oldProgress
     }
 
     Context "InFile parameter negative tests" {
